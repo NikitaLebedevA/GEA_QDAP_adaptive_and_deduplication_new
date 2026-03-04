@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "gea-gqap-adaptive-deduplication"
+version = "0.1.0"
+description = "Genetic Engineering Algorithm for GQAP with adaptive deduplication"
+authors = ["nalebedev"]
+packages = [
+    { include = "gea_gqap_python", from = "GEA_GQAP_Python" },
+    { include = "gea_gqap_adaptive_python", from = "gea_gqap_adaptive_python" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+numpy = ">=1.23"
+pandas = ">=1.5"
+openpyxl = ">=3.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
