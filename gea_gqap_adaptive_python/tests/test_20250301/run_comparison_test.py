@@ -38,7 +38,7 @@ from gea_gqap_adaptive_python import (
 from gea_gqap_python import load_model as load_model_na
 from gea_gqap_python.algorithm import run_ga, AlgorithmConfig
 
-NUM_WORKERS = int(os.environ.get("NUM_WORKERS", 32))
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", 16))
 
 
 def _ts() -> str:
@@ -392,7 +392,9 @@ def main():
 
 def _main_impl(test_dir: Path, results_dir: Path, log_path: Path):
     all_models = list_available_models()
-    datasets = sorted(all_models)
+    c_datasets = sorted(d for d in all_models if d.startswith("c"))
+    t_datasets = sorted(d for d in all_models if d.startswith("T"))
+    datasets = c_datasets + t_datasets
     time_limit = float(ALGORITHM.get("time_limit", 1000))
     total_tasks = len(datasets) * len(MODEL_VARIANTS) * len(ALGORITHM_TYPES) * NUM_RUNS
 
