@@ -4,11 +4,20 @@
   adaptive, non_adaptive, adaptive_wo_duplicates, non_adaptive_wo_duplicates.
 Параметры по статье: 1000 итераций, популяция 350, лимит времени 1000 с.
 Датасеты: все доступные (c и T). По 30 запусков на тип, на каждый датасет.
+Параллельное выполнение: запуски распределяются по NUM_WORKERS процессам.
 """
+
+import os
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import json
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Tuple
@@ -28,6 +37,23 @@ from gea_gqap_adaptive_python import (
 )
 from gea_gqap_python import load_model as load_model_na
 from gea_gqap_python.algorithm import run_ga, AlgorithmConfig
+
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", 32))
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s} с"
+    if s < 3600:
+        return f"{s // 60} мин {s % 60} с"
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h} ч {m} мин {sec} с"
 
 
 class _Tee:
@@ -131,7 +157,7 @@ def _make_non_adaptive_config(enable_scenario: Tuple[bool, bool, bool], deduplic
     )
 
 
-def run_one_adaptive(
+def _run_one_adaptive(
     dataset_name: str,
     run_number: int,
     enable_scenario: Tuple[bool, bool, bool],
@@ -176,7 +202,7 @@ def run_one_adaptive(
     }
 
 
-def run_one_non_adaptive(
+def _run_one_non_adaptive(
     dataset_name: str,
     run_number: int,
     enable_scenario: Tuple[bool, bool, bool],
@@ -199,37 +225,85 @@ def run_one_non_adaptive(
     }
 
 
-def run_dataset_tests(dataset_name: str, output_dir: Path) -> Dict[str, Any]:
-    models_results: Dict[str, Dict[str, Any]] = {}
+def _worker(task: Tuple) -> Tuple[str, str, int, Dict[str, Any] | None, str | None]:
+    """Execute a single algorithm run in a separate process."""
+    dataset_name, model_key, algo_type, run_num, enable_scenario = task
 
+    seed = hash((dataset_name, model_key, algo_type, run_num)) & 0x7FFFFFFF
+    np.random.seed(seed)
+
+    dedupe = "wo_duplicates" in algo_type
+    is_adaptive = "adaptive" in algo_type and "non_adaptive" not in algo_type
+
+    try:
+        if is_adaptive:
+            result = _run_one_adaptive(dataset_name, run_num, enable_scenario, deduplicate=dedupe)
+        else:
+            result = _run_one_non_adaptive(dataset_name, run_num, enable_scenario, deduplicate=dedupe)
+        return (model_key, algo_type, run_num, result, None)
+    except Exception as e:
+        return (model_key, algo_type, run_num, None, str(e))
+
+
+def run_dataset_tests(dataset_name: str, output_dir: Path) -> Dict[str, Any]:
+    tasks = []
     for model_key, enable_scenario in MODEL_VARIANTS.items():
+        for algo_type in ALGORITHM_TYPES:
+            for run_num in range(1, NUM_RUNS + 1):
+                tasks.append((dataset_name, model_key, algo_type, run_num, enable_scenario))
+
+    total = len(tasks)
+    print(f"  Задач: {total}, воркеров: {NUM_WORKERS}", flush=True)
+
+    results_map: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    errors = 0
+    t_start = time.monotonic()
+
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        futures = {executor.submit(_worker, t): t for t in tasks}
+        done_count = 0
+        for future in as_completed(futures):
+            done_count += 1
+            model_key, algo_type, run_num, result, error = future.result()
+            if error:
+                errors += 1
+                print(f"  [{_ts()}] ERR [{model_key}] {algo_type} run {run_num}: {error}", flush=True)
+            else:
+                key = (model_key, algo_type)
+                results_map.setdefault(key, []).append(result)
+            if done_count % NUM_WORKERS == 0 or done_count == total:
+                elapsed = time.monotonic() - t_start
+                pct = done_count / total * 100
+                print(f"  [{_ts()}] {done_count}/{total} ({pct:.0f}%) | {_fmt_duration(elapsed)}", flush=True)
+
+    ds_elapsed = time.monotonic() - t_start
+    print(f"  --- Результаты ({dataset_name}, {_fmt_duration(ds_elapsed)}) ---", flush=True)
+
+    models_results: Dict[str, Dict[str, Any]] = {}
+    for model_key in MODEL_VARIANTS:
         models_results[model_key] = {}
         for algo_type in ALGORITHM_TYPES:
-            print(f"  [{model_key}] {algo_type}...", end=" ", flush=True)
-            runs = []
-            best_costs = []
-            elapsed_times = []
-            dedupe = "wo_duplicates" in algo_type
-            is_adaptive = "adaptive" in algo_type and "non_adaptive" not in algo_type
-
-            for run_num in range(1, NUM_RUNS + 1):
-                try:
-                    if is_adaptive:
-                        r = run_one_adaptive(dataset_name, run_num, enable_scenario, deduplicate=dedupe)
-                    else:
-                        r = run_one_non_adaptive(dataset_name, run_num, enable_scenario, deduplicate=dedupe)
-                    runs.append(r)
-                    best_costs.append(r["best_cost"])
-                    elapsed_times.append(r["elapsed_time"])
-                except Exception as e:
-                    print(f" err:{e} ", end="", flush=True)
-            print(f" ok {len(runs)}/{NUM_RUNS}", flush=True)
-
+            runs = results_map.get((model_key, algo_type), [])
+            runs.sort(key=lambda r: r["run_number"])
+            best_costs = [r["best_cost"] for r in runs]
+            elapsed_times = [r["elapsed_time"] for r in runs]
+            stats_bc = calculate_statistics(best_costs)
+            stats_et = calculate_statistics(elapsed_times)
             models_results[model_key][algo_type] = {
-                "best_cost": calculate_statistics(best_costs),
-                "elapsed_time": calculate_statistics(elapsed_times),
+                "best_cost": stats_bc,
+                "elapsed_time": stats_et,
                 "runs": runs,
             }
+            print(
+                f"  [{model_key:5s}] {algo_type:30s} "
+                f"{len(runs):2d}/{NUM_RUNS} runs | "
+                f"cost: mean={stats_bc['mean']:.1f}, min={stats_bc['min']:.1f} | "
+                f"time: mean={stats_et['mean']:.1f} с",
+                flush=True,
+            )
+
+    if errors:
+        print(f"  Ошибок: {errors}", flush=True)
 
     result = {
         "dataset": dataset_name,
@@ -318,26 +392,38 @@ def main():
 
 def _main_impl(test_dir: Path, results_dir: Path, log_path: Path):
     all_models = list_available_models()
-    # Все датасеты: и c (Cordeau), и T (Fathollahi-Fard и др.)
     datasets = sorted(all_models)
     time_limit = float(ALGORITHM.get("time_limit", 1000))
+    total_tasks = len(datasets) * len(MODEL_VARIANTS) * len(ALGORITHM_TYPES) * NUM_RUNS
 
-    print(f"Лог: {log_path}")
-    print(f"Типы: {ALGORITHM_TYPES}")
-    print(f"Модели: {list(MODEL_VARIANTS.keys())}")
-    print(f"Датасетов: {len(datasets)} (c + T), по {NUM_RUNS} запусков на тип")
-    print(f"Итераций: {ITERATIONS}, популяция: {POPULATION_SIZE}, лимит времени: {time_limit} с")
+    print(f"[{_ts()}] === Старт тестирования ===")
+    print(f"[{_ts()}] Лог: {log_path}")
+    print(f"[{_ts()}] Типы: {', '.join(ALGORITHM_TYPES)}")
+    print(f"[{_ts()}] Модели: {', '.join(MODEL_VARIANTS.keys())}")
+    print(f"[{_ts()}] Датасетов: {len(datasets)} (c + T), по {NUM_RUNS} запусков на тип")
+    print(f"[{_ts()}] Итераций: {ITERATIONS}, популяция: {POPULATION_SIZE}, лимит времени: {time_limit} с")
+    print(f"[{_ts()}] Параллельных воркеров: {NUM_WORKERS}")
+    print(f"[{_ts()}] Всего задач: {total_tasks}")
+
     all_results = []
+    t_total_start = time.monotonic()
+
     for idx, dataset in enumerate(datasets, 1):
-        print(f"\n{'#'*70}\nДатасет {idx}/{len(datasets)}: {dataset}\n{'#'*70}")
+        print(f"\n{'#'*70}")
+        print(f"[{_ts()}] Датасет {idx}/{len(datasets)}: {dataset}")
+        print(f"{'#'*70}")
         try:
             stats = run_dataset_tests(dataset, results_dir)
             all_results.append(stats)
         except Exception as e:
-            print(f"Ошибка: {e}")
+            print(f"[{_ts()}] ОШИБКА на {dataset}: {e}")
+
+    total_elapsed = time.monotonic() - t_total_start
+
     summary = {
         "test_date": datetime.now().strftime("%Y%m%d"),
         "test_timestamp": datetime.now().isoformat(),
+        "total_elapsed_seconds": round(total_elapsed, 1),
         "parameters": {
             "num_runs_per_algorithm": NUM_RUNS,
             "iterations": ITERATIONS,
@@ -345,6 +431,7 @@ def _main_impl(test_dir: Path, results_dir: Path, log_path: Path):
             "time_limit_seconds": time_limit,
             "algorithm_types": ALGORITHM_TYPES,
             "model_variants": list(MODEL_VARIANTS.keys()),
+            "num_workers": NUM_WORKERS,
         },
         "datasets": [r["dataset"] for r in all_results],
         "results": all_results,
@@ -352,10 +439,12 @@ def _main_impl(test_dir: Path, results_dir: Path, log_path: Path):
     summary_file = results_dir / "summary_all_datasets.json"
     with summary_file.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
-    print(f"\nСводка: {summary_file}")
+    print(f"\n[{_ts()}] === Тестирование завершено ===")
+    print(f"[{_ts()}] Общее время: {_fmt_duration(total_elapsed)}")
+    print(f"[{_ts()}] Сводка: {summary_file}")
     excel_file = test_dir / "comparison_results.xlsx"
     create_excel_report(results_dir, excel_file)
-    print(f"Лог записан: {log_path}")
+    print(f"[{_ts()}] Лог записан: {log_path}")
 
 
 if __name__ == "__main__":
