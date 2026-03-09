@@ -36,12 +36,11 @@ def _select_population_dedupe(
     population_size: int,
     model: Model,
     rng: np.random.Generator,
-    start_time: float = 0.0,
-    time_limit: float | None = None,
 ) -> Tuple[List[Individual], List[str]]:
     """
     Из пула отбирает уникальных по генотипу (permutation), при нехватке дозаполняет
     случайными (мутация от лучшего). Возвращает (population, top_origins).
+    Лимит времени не применяется — дозаполнение всегда выполняется до конца.
     """
     seen: set = set()
     unique_list: List[Tuple[Individual, str]] = []
@@ -57,8 +56,6 @@ def _select_population_dedupe(
         return pop, origins
     best_ind = min(unique_list, key=lambda x: x[0].cost)[0]
     while len(unique_list) < population_size:
-        if time_limit is not None and (time.perf_counter() - start_time) >= time_limit:
-            break
         new_perm = mutation(best_ind.permutation, model, rng)
         new_ind = evaluate_permutation(new_perm, model)
         if math.isfinite(new_ind.cost):
@@ -207,7 +204,6 @@ def run_ga(
         if getattr(cfg, "deduplicate", False):
             population, top_origins = _select_population_dedupe(
                 pool, cfg.population_size, model, rng,
-                start_time=start_time, time_limit=cfg.time_limit,
             )
         else:
             population = [ind for ind, _ in pool[: cfg.population_size]]
