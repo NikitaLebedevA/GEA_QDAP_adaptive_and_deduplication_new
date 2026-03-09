@@ -7,6 +7,11 @@ from .utils import evaluate_permutation
 
 
 def heuristic2(model: Model) -> Individual:
+    """
+    Initial solution + repair. Matches MATLAB Heuristic2.m:
+    CT(i,j) = cij(i,j) + sum(DIS(i,:)) + sum(F(j,:)); assign job j to facility with min CT(:,j)
+    respecting capacity (try all in order); then cascading repair while min(cvar)<0.
+    """
     I, J = model.I, model.J
     X = np.zeros((I, J), dtype=int)
     count = np.zeros(I, dtype=float)

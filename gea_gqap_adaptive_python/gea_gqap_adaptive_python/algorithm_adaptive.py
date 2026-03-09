@@ -124,10 +124,7 @@ def run_adaptive_ga(
     best_solution = heuristic2(model)
     population.append(best_solution)
 
-    init_budget = (cfg.time_limit * 0.1) if cfg.time_limit is not None else None
     while len(population) < cfg.population_size:
-        if init_budget is not None and (time.perf_counter() - start_time) >= init_budget:
-            break
         mutated = mutation(population[0].permutation, model, rng)
         individual = evaluate_permutation(mutated, model)
         if math.isfinite(individual.cost):
@@ -141,6 +138,9 @@ def run_adaptive_ga(
     stats = AdaptiveAlgorithmStats()
 
     for iteration in range(cfg.iterations):
+        n_pop = len(population)
+        if n_pop == 0:
+            break
         costs = np.array([ind.cost for ind in population], dtype=float)
         probabilities = np.exp(-beta * costs / worst_cost)
         probabilities /= probabilities.sum()
@@ -218,7 +218,7 @@ def run_adaptive_ga(
         mutations: List[Individual] = []
         mutation_origins: List[str] = []
         for _ in range(nmutation):
-            idx = rng.integers(0, cfg.population_size)
+            idx = rng.integers(0, n_pop)
             parent = population[idx]
             parent_cost = parent.cost
 
@@ -237,9 +237,9 @@ def run_adaptive_ga(
         scenario_origins: List[str] = []
 
         if any(cfg.enable_scenario):
-            p_scenario1_count = max(1, int(cfg.p_scenario1 * cfg.population_size))
-            p_scenario2_count = max(1, int(cfg.p_scenario2 * cfg.population_size))
-            p_scenario3_count = max(1, int(cfg.p_scenario3 * cfg.population_size))
+            p_scenario1_count = min(max(1, int(cfg.p_scenario1 * cfg.population_size)), n_pop)
+            p_scenario2_count = min(max(1, int(cfg.p_scenario2 * cfg.population_size)), n_pop)
+            p_scenario3_count = min(max(1, int(cfg.p_scenario3 * cfg.population_size)), n_pop)
 
             # Сценарий 1: Кроссовер с доминантной хромосомой
             if cfg.enable_scenario[0] and p_scenario1_count >= 2 and ncrossover_scenario > 0:
@@ -303,7 +303,7 @@ def run_adaptive_ga(
                     population[:p_scenario3_count], cfg, model, rng
                 )
                 tail_indices = np.arange(
-                    max(0, cfg.population_size - p_scenario3_count), cfg.population_size
+                    max(0, n_pop - p_scenario3_count), n_pop
                 )
 
                 for _ in range(nmutate_scenario):

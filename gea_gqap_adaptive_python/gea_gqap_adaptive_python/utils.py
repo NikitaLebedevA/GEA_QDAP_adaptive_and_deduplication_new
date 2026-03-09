@@ -9,13 +9,18 @@ from .models import Individual, Model
 
 
 def create_xij(permutation: np.ndarray, model: Model) -> np.ndarray:
+    """X[i,j]=1 iff job j is assigned to facility i. Matches MATLAB CreateXij: xij(p(j),j)=1."""
     x = np.zeros((model.I, model.J), dtype=int)
     x[permutation, np.arange(model.J)] = 1
     return x
 
 
 def cost_function_perm(permutation: np.ndarray, model: Model) -> Tuple[float, np.ndarray]:
-    """O(J + J^2) instead of O(I*J + I^2*J + I*J^2) — exploits binary structure of Xij."""
+    """
+    Cost and capacity slack from permutation. Matches MATLAB CostFunction.m:
+    c1 = sum_ij cij(i,j)*X(i,j), c2 = sum_ijkl F(j,l)*DIS(i,k)*X(i,j)*X(k,l).
+    O(J + J^2) by using permutation directly.
+    """
     j_idx = np.arange(model.J)
     loads = np.bincount(permutation, weights=model.aij[permutation, j_idx], minlength=model.I)
     cvar = model.bi - loads
@@ -28,6 +33,7 @@ def cost_function_perm(permutation: np.ndarray, model: Model) -> Tuple[float, np
 
 
 def cost_function(x: np.ndarray, model: Model) -> Tuple[float, np.ndarray]:
+    """Cost from assignment matrix X. Same formula as CostFunction.m: c1 + c2, c2 = sum F(j,l)*DIS(i,k)*X(i,j)*X(k,l)."""
     x_float = x.astype(float, copy=False)
     loads = (model.aij * x_float).sum(axis=1)
     cvar = model.bi - loads
